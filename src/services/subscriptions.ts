@@ -161,6 +161,35 @@ export async function getMonthlyTotal(): Promise<{ currency: string; total: numb
   return Object.entries(totals).map(([currency, total]) => ({ currency, total: Math.round(total * 100) / 100 }));
 }
 
+export async function getActualMonthlySpending(year?: number, month?: number): Promise<{ currency: string; total: number; subscriptions: Subscription[] }[]> {
+  const now = new Date();
+  const targetYear = year ?? now.getFullYear();
+  const targetMonth = month ?? now.getMonth();
+
+  const startOfMonth = new Date(targetYear, targetMonth, 1);
+  const endOfMonth = new Date(targetYear, targetMonth + 1, 0);
+
+  const subs = await getActiveSubscriptions();
+  const byCurrency: Record<string, { total: number; subscriptions: Subscription[] }> = {};
+
+  subs.forEach((sub) => {
+    const billingDate = parseISO(sub.nextBillingDate);
+    if (billingDate >= startOfMonth && billingDate <= endOfMonth) {
+      if (!byCurrency[sub.currency]) {
+        byCurrency[sub.currency] = { total: 0, subscriptions: [] };
+      }
+      byCurrency[sub.currency].total += sub.amount;
+      byCurrency[sub.currency].subscriptions.push(sub);
+    }
+  });
+
+  return Object.entries(byCurrency).map(([currency, data]) => ({
+    currency,
+    total: Math.round(data.total * 100) / 100,
+    subscriptions: data.subscriptions,
+  }));
+}
+
 export async function getYearlyTotal(): Promise<{ currency: string; total: number }[]> {
   const monthlyTotals = await getMonthlyTotal();
   return monthlyTotals.map(({ currency, total }) => ({ currency, total: Math.round(total * 12 * 100) / 100 }));
@@ -169,6 +198,31 @@ export async function getYearlyTotal(): Promise<{ currency: string; total: numbe
 export async function getWeeklyTotal(): Promise<{ currency: string; total: number }[]> {
   const monthlyTotals = await getMonthlyTotal();
   return monthlyTotals.map(({ currency, total }) => ({ currency, total: Math.round(total / 4.33 * 100) / 100 }));
+}
+
+export async function markAsPaid(id: string): Promise<Subscription> {
+  const existing = await getSubscription(id);
+  if (!existing) throw new Error('Subscription not found');
+
+  await cancelReminders(existing.notificationIds);
+
+  const currentBillingDate = parseISO(existing.nextBillingDate);
+  const nextDate = getNextBillingDate(currentBillingDate, existing.billingCycle);
+  const nextBillingDate = nextDate.toISOString().split('T')[0];
+
+  const now = new Date().toISOString();
+  await runSql(
+    'UPDATE subscriptions SET next_billing_date = ?, updated_at = ?, notification_ids = ? WHERE id = ?',
+    [nextBillingDate, now, '[]', id]
+  );
+
+  const updated = await getSubscription(id);
+  if (updated && updated.isActive) {
+    const notificationIds = await scheduleReminders(updated);
+    await runSql('UPDATE subscriptions SET notification_ids = ? WHERE id = ?', [JSON.stringify(notificationIds), id]);
+    updated.notificationIds = notificationIds;
+  }
+  return updated!;
 }
 
 export async function getSpendingByCategory(): Promise<{ categoryId: string; currency: string; monthly: number; count: number }[]> {

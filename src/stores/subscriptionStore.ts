@@ -13,6 +13,7 @@ interface SubscriptionState {
   addSubscription: (data: Parameters<typeof subscriptionService.createSubscription>[0]) => Promise<Subscription>;
   updateSubscription: (id: string, data: Partial<Subscription>) => Promise<void>;
   deleteSubscription: (id: string) => Promise<void>;
+  markAsPaid: (id: string) => Promise<void>;
   getMonthlyTotal: () => Promise<{ currency: string; total: number }[]>;
   getUpcoming: (days: number) => Promise<Subscription[]>;
 }
@@ -58,6 +59,13 @@ export const useSubscriptionStore = create<SubscriptionState>((set, get) => ({
   deleteSubscription: async (id) => {
     await subscriptionService.deleteSubscription(id);
     set((state) => ({ subscriptions: state.subscriptions.filter((s) => s.id !== id) }));
+  },
+
+  markAsPaid: async (id) => {
+    const updated = await subscriptionService.markAsPaid(id);
+    set((state) => ({
+      subscriptions: state.subscriptions.map((s) => (s.id === id ? updated : s)).sort((a, b) => a.nextBillingDate.localeCompare(b.nextBillingDate)),
+    }));
   },
 
   getMonthlyTotal: () => subscriptionService.getMonthlyTotal(),

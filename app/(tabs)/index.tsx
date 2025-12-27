@@ -1,13 +1,13 @@
 import { useEffect, useState, useCallback } from 'react';
-import { View, ScrollView, StyleSheet, Pressable, RefreshControl } from 'react-native';
-import { Card, Text, useTheme, ActivityIndicator, Chip, ProgressBar, Divider, IconButton } from 'react-native-paper';
+import { View, ScrollView, StyleSheet, Pressable, RefreshControl, Alert } from 'react-native';
+import { Card, Text, useTheme, ActivityIndicator, Chip, ProgressBar, IconButton, Button } from 'react-native-paper';
 import { useRouter } from 'expo-router';
 import { useSubscriptionStore } from '../../src/stores/subscriptionStore';
-import { Subscription, Category } from '../../src/types';
-import { format, parseISO, differenceInDays, startOfDay } from 'date-fns';
+import { Subscription } from '../../src/types';
+import { format, parseISO } from 'date-fns';
 import * as subscriptionService from '../../src/services/subscriptions';
 
-type Period = 'weekly' | 'monthly' | 'yearly';
+type Period = 'monthly' | 'recurring' | 'yearly';
 
 interface CategorySpending {
   categoryId: string;
@@ -33,6 +33,12 @@ interface Stats {
   avgMonthly: { currency: string; avg: number }[];
 }
 
+interface ActualMonthlyData {
+  currency: string;
+  total: number;
+  subscriptions: Subscription[];
+}
+
 export default function Dashboard() {
   const theme = useTheme();
   const router = useRouter();
@@ -40,6 +46,7 @@ export default function Dashboard() {
 
   const [period, setPeriod] = useState<Period>('monthly');
   const [totals, setTotals] = useState<{ currency: string; total: number }[]>([]);
+  const [actualMonthly, setActualMonthly] = useState<ActualMonthlyData[]>([]);
   const [categorySpending, setCategorySpending] = useState<CategorySpending[]>([]);
   const [groupedUpcoming, setGroupedUpcoming] = useState<GroupedUpcoming | null>(null);
   const [stats, setStats] = useState<Stats | null>(null);
@@ -52,33 +59,36 @@ export default function Dashboard() {
   }, []);
 
   const loadAnalytics = useCallback(async () => {
-    const [spending, grouped, statsData] = await Promise.all([
+    const [spending, grouped, statsData, actualData] = await Promise.all([
       subscriptionService.getSpendingByCategory(),
       subscriptionService.getUpcomingGrouped(),
       subscriptionService.getStats(),
+      subscriptionService.getActualMonthlySpending(),
     ]);
     setCategorySpending(spending);
     setGroupedUpcoming(grouped);
     setStats(statsData);
+    setActualMonthly(actualData);
   }, []);
 
   const loadTotals = useCallback(async () => {
     let data: { currency: string; total: number }[];
     switch (period) {
-      case 'weekly':
-        data = await subscriptionService.getWeeklyTotal();
+      case 'recurring':
+        data = await subscriptionService.getMonthlyTotal();
         break;
       case 'yearly':
         data = await subscriptionService.getYearlyTotal();
         break;
       default:
-        data = await subscriptionService.getMonthlyTotal();
+        data = actualMonthly.map(d => ({ currency: d.currency, total: d.total }));
     }
     setTotals(data);
-  }, [period]);
+  }, [period, actualMonthly]);
 
   useEffect(() => { loadData(); }, []);
-  useEffect(() => { if (subscriptions.length > 0) { loadAnalytics(); loadTotals(); } }, [subscriptions, period]);
+  useEffect(() => { if (subscriptions.length > 0) loadAnalytics(); }, [subscriptions]);
+  useEffect(() => { loadTotals(); }, [period, actualMonthly]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -87,7 +97,6 @@ export default function Dashboard() {
   }, []);
 
   const getCategoryName = (id: string) => categories.find(c => c.id === id)?.name || 'Other';
-  const getCategoryIcon = (id: string) => categories.find(c => c.id === id)?.icon || 'help-circle';
 
   const toggleSection = (section: string) => {
     setExpandedSection(expandedSection === section ? null : section);
@@ -101,14 +110,36 @@ export default function Dashboard() {
     router.push(`/subscription/${id}`);
   };
 
+  const handleMarkAsPaid = async (sub: Subscription) => {
+    Alert.alert(
+      'Mark as Paid',
+      `Mark ${sub.name} as paid and move to next billing cycle?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Mark Paid',
+          onPress: async () => {
+            try {
+              await subscriptionService.markAsPaid(sub.id);
+              await loadData();
+            } catch (e) {
+              Alert.alert('Error', 'Failed to mark as paid');
+            }
+          },
+        },
+      ]
+    );
+  };
+
   if (isLoading && !refreshing) {
     return <View style={styles.center}><ActivityIndicator size="large" /></View>;
   }
 
   const activeCount = subscriptions.filter(s => s.isActive).length;
   const totalSpending = totals.reduce((sum, t) => sum + t.total, 0);
+  const currentMonth = format(new Date(), 'MMMM yyyy');
 
-  const renderUpcomingGroup = (title: string, items: Subscription[], color: string, icon: string) => {
+  const renderUpcomingGroup = (title: string, items: Subscription[], color: string) => {
     if (items.length === 0) return null;
     const groupTotal = items.reduce((sum, s) => sum + s.amount, 0);
     return (
@@ -121,22 +152,49 @@ export default function Dashboard() {
           </Text>
         </View>
         {items.map(sub => (
-          <Pressable key={sub.id} onPress={() => navigateToSubscription(sub.id)}>
-            <View style={styles.upcomingItem}>
-              <View style={{ flex: 1 }}>
-                <Text variant="bodyMedium">{sub.name}</Text>
-                <Text variant="bodySmall" style={{ color: theme.colors.outline }}>
-                  {format(parseISO(sub.nextBillingDate), 'MMM d')}
+          <View key={sub.id} style={styles.upcomingItemContainer}>
+            <Pressable style={{ flex: 1 }} onPress={() => navigateToSubscription(sub.id)}>
+              <View style={[styles.upcomingItem, { borderLeftColor: color }]}>
+                <View style={{ flex: 1 }}>
+                  <Text variant="bodyMedium">{sub.name}</Text>
+                  <Text variant="bodySmall" style={{ color: theme.colors.outline }}>
+                    {format(parseISO(sub.nextBillingDate), 'MMM d')} · {sub.billingCycle}
+                  </Text>
+                </View>
+                <Text variant="titleSmall" style={{ color: theme.colors.primary, marginRight: 8 }}>
+                  {sub.currency} {sub.amount.toFixed(2)}
                 </Text>
               </View>
-              <Text variant="titleSmall" style={{ color: theme.colors.primary }}>
-                {sub.currency} {sub.amount.toFixed(2)}
-              </Text>
-            </View>
-          </Pressable>
+            </Pressable>
+            <IconButton
+              icon="check-circle-outline"
+              size={24}
+              iconColor={theme.colors.primary}
+              onPress={() => handleMarkAsPaid(sub)}
+              style={styles.paidButton}
+            />
+          </View>
         ))}
       </View>
     );
+  };
+
+  const getPeriodLabel = () => {
+    switch (period) {
+      case 'monthly': return `${currentMonth} Bills`;
+      case 'recurring': return 'Monthly Average';
+      case 'yearly': return 'Yearly Total';
+    }
+  };
+
+  const getPeriodSubtext = () => {
+    switch (period) {
+      case 'monthly': 
+        const billCount = actualMonthly.reduce((sum, d) => sum + d.subscriptions.length, 0);
+        return `${billCount} bill${billCount !== 1 ? 's' : ''} due this month`;
+      case 'recurring': return 'Average monthly spending across all cycles';
+      case 'yearly': return 'Projected annual spending';
+    }
   };
 
   return (
@@ -146,24 +204,34 @@ export default function Dashboard() {
     >
       {/* Period Selector */}
       <View style={styles.periodSelector}>
-        {(['weekly', 'monthly', 'yearly'] as Period[]).map(p => (
-          <Chip
-            key={p}
-            selected={period === p}
-            onPress={() => setPeriod(p)}
-            style={[styles.periodChip, period === p && { backgroundColor: theme.colors.primaryContainer }]}
-          >
-            {p.charAt(0).toUpperCase() + p.slice(1)}
-          </Chip>
-        ))}
+        <Chip
+          selected={period === 'monthly'}
+          onPress={() => setPeriod('monthly')}
+          style={[styles.periodChip, period === 'monthly' && { backgroundColor: theme.colors.primaryContainer }]}
+        >
+          This Month
+        </Chip>
+        <Chip
+          selected={period === 'recurring'}
+          onPress={() => setPeriod('recurring')}
+          style={[styles.periodChip, period === 'recurring' && { backgroundColor: theme.colors.primaryContainer }]}
+        >
+          Recurring
+        </Chip>
+        <Chip
+          selected={period === 'yearly'}
+          onPress={() => setPeriod('yearly')}
+          style={[styles.periodChip, period === 'yearly' && { backgroundColor: theme.colors.primaryContainer }]}
+        >
+          Yearly
+        </Chip>
       </View>
 
       {/* Spending Overview */}
       <Card style={styles.card}>
         <Card.Content>
-          <Text variant="titleMedium" style={styles.cardTitle}>
-            {period.charAt(0).toUpperCase() + period.slice(1)} Spending
-          </Text>
+          <Text variant="titleMedium" style={styles.cardTitle}>{getPeriodLabel()}</Text>
+          <Text variant="bodySmall" style={{ color: theme.colors.outline, marginBottom: 8 }}>{getPeriodSubtext()}</Text>
           {totals.length > 0 ? (
             totals.map(({ currency, total }) => (
               <Text key={currency} variant="displaySmall" style={{ color: theme.colors.primary, fontWeight: 'bold' }}>
@@ -171,9 +239,31 @@ export default function Dashboard() {
               </Text>
             ))
           ) : (
-            <Text variant="bodyLarge" style={{ color: theme.colors.outline }}>No active subscriptions</Text>
+            <Text variant="bodyLarge" style={{ color: theme.colors.outline }}>
+              {period === 'monthly' ? 'No bills due this month' : 'No active subscriptions'}
+            </Text>
           )}
-          {stats && (
+          
+          {/* Show bills due this month when in monthly view */}
+          {period === 'monthly' && actualMonthly.length > 0 && (
+            <View style={styles.monthlyBillsList}>
+              {actualMonthly.flatMap(d => d.subscriptions).map(sub => (
+                <Pressable key={sub.id} onPress={() => navigateToSubscription(sub.id)}>
+                  <View style={styles.monthlyBillItem}>
+                    <Text variant="bodyMedium" style={{ flex: 1 }}>{sub.name}</Text>
+                    <Text variant="bodySmall" style={{ color: theme.colors.outline, marginRight: 8 }}>
+                      {format(parseISO(sub.nextBillingDate), 'MMM d')}
+                    </Text>
+                    <Text variant="bodyMedium" style={{ fontWeight: 'bold' }}>
+                      {sub.currency} {sub.amount.toFixed(2)}
+                    </Text>
+                  </View>
+                </Pressable>
+              ))}
+            </View>
+          )}
+
+          {stats && period !== 'monthly' && (
             <View style={styles.statsRow}>
               <View style={styles.statItem}>
                 <Text variant="headlineSmall" style={{ color: theme.colors.secondary }}>{stats.totalActive}</Text>
@@ -194,6 +284,45 @@ export default function Dashboard() {
             </View>
           )}
         </Card.Content>
+      </Card>
+
+      {/* Upcoming Bills - Expandable */}
+      <Card style={styles.card}>
+        <Pressable onPress={() => toggleSection('upcoming')}>
+          <Card.Content>
+            <View style={styles.sectionHeader}>
+              <View>
+                <Text variant="titleMedium" style={styles.cardTitle}>Upcoming Bills</Text>
+                <Text variant="bodySmall" style={{ color: theme.colors.outline }}>Tap check to mark as paid</Text>
+              </View>
+              <IconButton 
+                icon={expandedSection === 'upcoming' ? 'chevron-up' : 'chevron-down'} 
+                size={20}
+              />
+            </View>
+          </Card.Content>
+        </Pressable>
+        {expandedSection === 'upcoming' && groupedUpcoming && (
+          <Card.Content>
+            {groupedUpcoming.overdue.length === 0 && 
+             groupedUpcoming.today.length === 0 && 
+             groupedUpcoming.tomorrow.length === 0 && 
+             groupedUpcoming.thisWeek.length === 0 && 
+             groupedUpcoming.nextWeek.length === 0 ? (
+              <Text variant="bodyLarge" style={{ color: theme.colors.outline, textAlign: 'center', paddingVertical: 16 }}>
+                No upcoming bills in the next 2 weeks
+              </Text>
+            ) : (
+              <>
+                {renderUpcomingGroup('Overdue', groupedUpcoming.overdue, theme.colors.error)}
+                {renderUpcomingGroup('Today', groupedUpcoming.today, theme.colors.error)}
+                {renderUpcomingGroup('Tomorrow', groupedUpcoming.tomorrow, '#FF9800')}
+                {renderUpcomingGroup('This Week', groupedUpcoming.thisWeek, '#FFC107')}
+                {renderUpcomingGroup('Next Week', groupedUpcoming.nextWeek, theme.colors.primary)}
+              </>
+            )}
+          </Card.Content>
+        )}
       </Card>
 
       {/* Quick Insights */}
@@ -222,42 +351,6 @@ export default function Dashboard() {
           </Card.Content>
         </Card>
       )}
-
-      {/* Upcoming Bills - Expandable */}
-      <Card style={styles.card}>
-        <Pressable onPress={() => toggleSection('upcoming')}>
-          <Card.Content>
-            <View style={styles.sectionHeader}>
-              <Text variant="titleMedium" style={styles.cardTitle}>Upcoming Bills</Text>
-              <IconButton 
-                icon={expandedSection === 'upcoming' ? 'chevron-up' : 'chevron-down'} 
-                size={20}
-              />
-            </View>
-          </Card.Content>
-        </Pressable>
-        {expandedSection === 'upcoming' && groupedUpcoming && (
-          <Card.Content>
-            {groupedUpcoming.overdue.length === 0 && 
-             groupedUpcoming.today.length === 0 && 
-             groupedUpcoming.tomorrow.length === 0 && 
-             groupedUpcoming.thisWeek.length === 0 && 
-             groupedUpcoming.nextWeek.length === 0 ? (
-              <Text variant="bodyLarge" style={{ color: theme.colors.outline, textAlign: 'center', paddingVertical: 16 }}>
-                No upcoming bills in the next 2 weeks
-              </Text>
-            ) : (
-              <>
-                {renderUpcomingGroup('Overdue', groupedUpcoming.overdue, theme.colors.error, 'alert-circle')}
-                {renderUpcomingGroup('Today', groupedUpcoming.today, theme.colors.error, 'clock')}
-                {renderUpcomingGroup('Tomorrow', groupedUpcoming.tomorrow, '#FF9800', 'clock-outline')}
-                {renderUpcomingGroup('This Week', groupedUpcoming.thisWeek, '#FFC107', 'calendar-week')}
-                {renderUpcomingGroup('Next Week', groupedUpcoming.nextWeek, theme.colors.primary, 'calendar')}
-              </>
-            )}
-          </Card.Content>
-        )}
-      </Card>
 
       {/* Category Breakdown - Expandable */}
       <Card style={styles.card}>
@@ -332,7 +425,7 @@ const styles = StyleSheet.create({
   periodSelector: { flexDirection: 'row', marginBottom: 16, gap: 8 },
   periodChip: { flex: 1 },
   card: { marginBottom: 12, borderRadius: 12 },
-  cardTitle: { fontWeight: 'bold', marginBottom: 8 },
+  cardTitle: { fontWeight: 'bold', marginBottom: 4 },
   statsRow: { flexDirection: 'row', marginTop: 16, justifyContent: 'space-around' },
   statItem: { alignItems: 'center' },
   insightRow: { flexDirection: 'row', flexWrap: 'wrap', marginBottom: 4 },
@@ -340,7 +433,11 @@ const styles = StyleSheet.create({
   upcomingGroup: { marginBottom: 16 },
   groupHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 8 },
   urgencyDot: { width: 8, height: 8, borderRadius: 4, marginRight: 8 },
-  upcomingItem: { flexDirection: 'row', alignItems: 'center', paddingVertical: 8, paddingLeft: 16, borderLeftWidth: 2, borderLeftColor: '#e0e0e0', marginLeft: 3 },
+  upcomingItemContainer: { flexDirection: 'row', alignItems: 'center' },
+  upcomingItem: { flex: 1, flexDirection: 'row', alignItems: 'center', paddingVertical: 8, paddingLeft: 16, borderLeftWidth: 3, marginLeft: 3 },
+  paidButton: { margin: 0 },
+  monthlyBillsList: { marginTop: 12, borderTopWidth: 1, borderTopColor: '#e0e0e0', paddingTop: 12 },
+  monthlyBillItem: { flexDirection: 'row', alignItems: 'center', paddingVertical: 6 },
   categoryItem: { paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#f0f0f0' },
   categoryHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 8 },
   progressBar: { height: 6, borderRadius: 3 },
