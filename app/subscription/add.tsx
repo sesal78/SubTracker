@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react';
-import { View, ScrollView, StyleSheet, Platform, Pressable, FlatList } from 'react-native';
+import { View, ScrollView, StyleSheet, Platform, Pressable } from 'react-native';
 import { TextInput, Button, SegmentedButtons, useTheme, Menu, List, Surface } from 'react-native-paper';
 import { useRouter } from 'expo-router';
 import { useSubscriptionStore } from '../../src/stores/subscriptionStore';
@@ -118,19 +118,16 @@ export default function AddSubscription() {
         />
         {showSuggestions && suggestions.length > 0 && (
           <Surface style={[styles.suggestionsContainer, { backgroundColor: theme.colors.surface }]} elevation={3}>
-            <FlatList
-              data={suggestions}
-              keyExtractor={(item) => item}
-              keyboardShouldPersistTaps="handled"
-              style={styles.suggestionsList}
-              renderItem={({ item }) => (
+            <ScrollView style={styles.suggestionsList} nestedScrollEnabled keyboardShouldPersistTaps="handled">
+              {suggestions.map((item) => (
                 <List.Item
+                  key={item}
                   title={item}
                   onPress={() => handleSelectSuggestion(item)}
                   style={styles.suggestionItem}
                 />
-              )}
-            />
+              ))}
+            </ScrollView>
           </Surface>
         )}
       </View>
