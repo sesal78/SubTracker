@@ -165,3 +165,108 @@ export async function getYearlyTotal(): Promise<{ currency: string; total: numbe
   const monthlyTotals = await getMonthlyTotal();
   return monthlyTotals.map(({ currency, total }) => ({ currency, total: Math.round(total * 12 * 100) / 100 }));
 }
+
+export async function getWeeklyTotal(): Promise<{ currency: string; total: number }[]> {
+  const monthlyTotals = await getMonthlyTotal();
+  return monthlyTotals.map(({ currency, total }) => ({ currency, total: Math.round(total / 4.33 * 100) / 100 }));
+}
+
+export async function getSpendingByCategory(): Promise<{ categoryId: string; currency: string; monthly: number; count: number }[]> {
+  const subs = await getActiveSubscriptions();
+  const byCategory: Record<string, Record<string, { monthly: number; count: number }>> = {};
+
+  subs.forEach((sub) => {
+    const monthly = calculateMonthlyEquivalent(sub.amount, sub.billingCycle);
+    if (!byCategory[sub.categoryId]) byCategory[sub.categoryId] = {};
+    if (!byCategory[sub.categoryId][sub.currency]) {
+      byCategory[sub.categoryId][sub.currency] = { monthly: 0, count: 0 };
+    }
+    byCategory[sub.categoryId][sub.currency].monthly += monthly;
+    byCategory[sub.categoryId][sub.currency].count += 1;
+  });
+
+  const result: { categoryId: string; currency: string; monthly: number; count: number }[] = [];
+  Object.entries(byCategory).forEach(([categoryId, currencies]) => {
+    Object.entries(currencies).forEach(([currency, data]) => {
+      result.push({
+        categoryId,
+        currency,
+        monthly: Math.round(data.monthly * 100) / 100,
+        count: data.count,
+      });
+    });
+  });
+  return result;
+}
+
+export async function getSubscriptionsByCategory(categoryId: string): Promise<Subscription[]> {
+  const rows = await executeSql<DbSubscription>(
+    'SELECT * FROM subscriptions WHERE category_id = ? ORDER BY next_billing_date ASC',
+    [categoryId]
+  );
+  return rows.map(mapFromDb);
+}
+
+export async function getStats(): Promise<{
+  totalActive: number;
+  totalInactive: number;
+  mostExpensive: Subscription | null;
+  cheapest: Subscription | null;
+  avgMonthly: { currency: string; avg: number }[];
+}> {
+  const all = await getAllSubscriptions();
+  const active = all.filter(s => s.isActive);
+  const inactive = all.filter(s => !s.isActive);
+
+  const withMonthly = active.map(s => ({
+    ...s,
+    monthlyAmount: calculateMonthlyEquivalent(s.amount, s.billingCycle)
+  }));
+
+  const sorted = withMonthly.sort((a, b) => b.monthlyAmount - a.monthlyAmount);
+  const mostExpensive = sorted.length > 0 ? sorted[0] : null;
+  const cheapest = sorted.length > 0 ? sorted[sorted.length - 1] : null;
+
+  const totals = await getMonthlyTotal();
+  const avgMonthly = totals.map(({ currency, total }) => ({
+    currency,
+    avg: active.filter(s => s.currency === currency).length > 0
+      ? Math.round(total / active.filter(s => s.currency === currency).length * 100) / 100
+      : 0
+  }));
+
+  return { totalActive: active.length, totalInactive: inactive.length, mostExpensive, cheapest, avgMonthly };
+}
+
+export async function getUpcomingGrouped(): Promise<{
+  overdue: Subscription[];
+  today: Subscription[];
+  tomorrow: Subscription[];
+  thisWeek: Subscription[];
+  nextWeek: Subscription[];
+  later: Subscription[];
+}> {
+  const subs = await getActiveSubscriptions();
+  const now = startOfDay(new Date());
+
+  const overdue: Subscription[] = [];
+  const today: Subscription[] = [];
+  const tomorrow: Subscription[] = [];
+  const thisWeek: Subscription[] = [];
+  const nextWeek: Subscription[] = [];
+  const later: Subscription[] = [];
+
+  subs.forEach(sub => {
+    const billingDate = parseISO(sub.nextBillingDate);
+    const diff = Math.floor((billingDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+
+    if (diff < 0) overdue.push(sub);
+    else if (diff === 0) today.push(sub);
+    else if (diff === 1) tomorrow.push(sub);
+    else if (diff <= 7) thisWeek.push(sub);
+    else if (diff <= 14) nextWeek.push(sub);
+    else later.push(sub);
+  });
+
+  return { overdue, today, tomorrow, thisWeek, nextWeek, later };
+}
