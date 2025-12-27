@@ -4,7 +4,7 @@ import { Card, Text, useTheme, ActivityIndicator } from 'react-native-paper';
 import { useRouter } from 'expo-router';
 import { useSubscriptionStore } from '../../src/stores/subscriptionStore';
 import { Subscription } from '../../src/types';
-import { format, parseISO, differenceInDays } from 'date-fns';
+import { format, parseISO, differenceInDays, startOfDay } from 'date-fns';
 
 export default function Dashboard() {
   const theme = useTheme();
@@ -65,12 +65,12 @@ export default function Dashboard() {
           <Text variant="titleMedium">Upcoming (Next 7 Days)</Text>
           {upcoming.length > 0 ? (
             upcoming.map((sub) => {
-              const daysLeft = differenceInDays(parseISO(sub.nextBillingDate), new Date());
+              const daysLeft = differenceInDays(parseISO(sub.nextBillingDate), startOfDay(new Date()));
               return (
                 <View key={sub.id} style={styles.upcomingItem}>
                   <Text variant="bodyLarge">{sub.name}</Text>
                   <Text variant="bodyMedium" style={{ color: theme.colors.outline }}>
-                    {sub.currency} {sub.amount.toFixed(2)} - {daysLeft === 0 ? 'Today' : `in ${daysLeft} days`}
+                    {sub.currency} {sub.amount.toFixed(2)} - {daysLeft === 0 ? 'Today' : daysLeft === 1 ? 'Tomorrow' : `in ${daysLeft} days`}
                   </Text>
                 </View>
               );
